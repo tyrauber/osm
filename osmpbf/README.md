@@ -1,9 +1,9 @@
 # osm/osmpbf [![Go Reference](https://pkg.go.dev/badge/github.com/paulmach/osm.svg)](https://pkg.go.dev/github.com/paulmach/osm/osmpbf)
 
-Package osmpbf provides a scanner for decoding large [OSM PBF](https://wiki.openstreetmap.org/wiki/PBF_Format) files.
+Package osmpbf provides a scanner for decoding and an encoder for encoding large [OSM PBF](https://wiki.openstreetmap.org/wiki/PBF_Format) files.
 They are typically found at [planet.osm.org](https://planet.openstreetmap.org/) or [Geofabrik Download](https://download.geofabrik.de/).
 
-## Example:
+## Decoding Example:
 
 ```go
 file, err := os.Open("./delaware-latest.osm.pbf")
@@ -34,6 +34,59 @@ if err := scanner.Err(); err != nil {
 
 **Note:** Scanners are **not** safe for parallel use. One should feed the
 objects into a channel and have workers read from that.
+
+## Encoding Example:
+
+```go
+file, err := os.Create("./output.osm.pbf")
+if err != nil {
+	panic(err)
+}
+defer file.Close()
+
+// Create an encoder with options
+encoder := osmpbf.NewEncoder(file,
+	osmpbf.WithWritingProgram("my-program"),
+	osmpbf.WithCompression(true),
+)
+
+// Start the encoder
+errChan, err := encoder.Start()
+if err != nil {
+	panic(err)
+}
+
+// Write some OSM objects
+encoder.WriteNode(&osm.Node{
+	ID:  1,
+	Lat: 51.5074,
+	Lon: -0.1278,
+	Tags: osm.Tags{
+		{Key: "name", Value: "London"},
+	},
+})
+
+encoder.WriteWay(&osm.Way{
+	ID: 2,
+	Nodes: osm.WayNodes{
+		{ID: 1},
+		{ID: 3},
+	},
+	Tags: osm.Tags{
+		{Key: "highway", Value: "residential"},
+	},
+})
+
+// Close the encoder when done
+if err := encoder.Close(); err != nil {
+	panic(err)
+}
+
+// Check for any encoding errors
+for err := range errChan {
+	panic(err)
+}
+```
 
 ## Skipping Types
 
