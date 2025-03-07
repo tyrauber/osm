@@ -752,3 +752,149 @@ func (e *Encoder) encodeRelations(relations []*osm.Relation, stringTableMap map[
 
 	return e.encodeBlockToBlob(data, "OSMData")
 }
+
+// StreamingEncoder is an optimized encoder for continuous processing of OSM data.
+// It automatically flushes data when batch size limits are reached.
+type StreamingEncoder struct {
+	encoder    *Encoder
+	batchSize  int
+	nodeCount  int
+	wayCount   int
+	relCount   int
+	errHandler func(error)
+}
+
+// StreamingEncoderOption is a function that configures a StreamingEncoder.
+type StreamingEncoderOption func(*StreamingEncoder)
+
+// WithBatchSize sets the number of elements to batch before flushing.
+func WithBatchSize(size int) StreamingEncoderOption {
+	return func(e *StreamingEncoder) {
+		e.batchSize = size
+	}
+}
+
+// WithErrorHandler sets a custom error handler function.
+func WithErrorHandler(handler func(error)) StreamingEncoderOption {
+	return func(e *StreamingEncoder) {
+		e.errHandler = handler
+	}
+}
+
+// NewStreamingEncoder creates a new streaming encoder that writes to the given writer.
+func NewStreamingEncoder(w io.WriteCloser, options ...interface{}) *StreamingEncoder {
+	// Separate encoder options from streaming options
+	var encoderOpts []EncoderOption
+	var streamingOpts []StreamingEncoderOption
+
+	for _, opt := range options {
+		switch o := opt.(type) {
+		case EncoderOption:
+			encoderOpts = append(encoderOpts, o)
+		case StreamingEncoderOption:
+			streamingOpts = append(streamingOpts, o)
+		}
+	}
+
+	se := &StreamingEncoder{
+		encoder:   NewEncoder(w, encoderOpts...),
+		batchSize: 8000, // Default batch size
+		errHandler: func(err error) {
+			// Default error handler just logs the error
+			fmt.Printf("StreamingEncoder error: %v\n", err)
+		},
+	}
+
+	// Apply streaming options
+	for _, opt := range streamingOpts {
+		opt(se)
+	}
+
+	return se
+}
+
+// Start begins the encoding process and returns a channel for errors.
+func (se *StreamingEncoder) Start() (<-chan error, error) {
+	return se.encoder.Start()
+}
+
+// Close flushes any remaining data and closes the encoder.
+func (se *StreamingEncoder) Close() error {
+	// Flush any remaining data
+	se.Flush()
+	return se.encoder.Close()
+}
+
+// Flush forces the encoder to flush any pending data.
+func (se *StreamingEncoder) Flush() {
+	se.encoder.Flush()
+	se.nodeCount = 0
+	se.wayCount = 0
+	se.relCount = 0
+}
+
+// WriteNode adds a node to the encoder queue and flushes if batch size is reached.
+func (se *StreamingEncoder) WriteNode(node *osm.Node) error {
+	se.encoder.WriteNode(node)
+	se.nodeCount++
+
+	// Flush if we've reached the batch size
+	if se.nodeCount >= se.batchSize {
+		done := make(chan struct{})
+		se.encoder.nodeFlush <- done
+		<-done
+		se.nodeCount = 0
+	}
+
+	return nil
+}
+
+// WriteWay adds a way to the encoder queue and flushes if batch size is reached.
+func (se *StreamingEncoder) WriteWay(way *osm.Way) error {
+	se.encoder.WriteWay(way)
+	se.wayCount++
+
+	// Flush if we've reached the batch size
+	if se.wayCount >= se.batchSize {
+		done := make(chan struct{})
+		se.encoder.wayFlush <- done
+		<-done
+		se.wayCount = 0
+	}
+
+	return nil
+}
+
+// WriteRelation adds a relation to the encoder queue and flushes if batch size is reached.
+func (se *StreamingEncoder) WriteRelation(relation *osm.Relation) error {
+	se.encoder.WriteRelation(relation)
+	se.relCount++
+
+	// Flush if we've reached the batch size
+	if se.relCount >= se.batchSize {
+		done := make(chan struct{})
+		se.encoder.relFlush <- done
+		<-done
+		se.relCount = 0
+	}
+
+	return nil
+}
+
+// WriteObject adds an OSM object to the encoder queue.
+func (se *StreamingEncoder) WriteObject(obj interface{}) error {
+	switch o := obj.(type) {
+	case *osm.Node:
+		return se.WriteNode(o)
+	case *osm.Way:
+		return se.WriteWay(o)
+	case *osm.Relation:
+		return se.WriteRelation(o)
+	default:
+		err := fmt.Errorf("unsupported object type: %T", obj)
+		if se.errHandler != nil {
+			se.errHandler(err)
+		}
+		return err
+	}
+}

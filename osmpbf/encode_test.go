@@ -3,6 +3,7 @@ package osmpbf
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -578,5 +579,156 @@ func BenchmarkEncoder_NoCompression(b *testing.B) {
 		for err := range errChan {
 			b.Fatalf("Encoder error: %v", err)
 		}
+	}
+}
+
+func TestStreamingEncoder(t *testing.T) {
+	// Create a buffer to write to
+	var buf bytes.Buffer
+	writeCloser := &bufferWriteCloser{&buf}
+
+	// Create a streaming encoder with a small batch size
+	encoder := NewStreamingEncoder(writeCloser,
+		WithWritingProgram("streaming-test"),
+		WithBatchSize(5), // Small batch size to test flushing
+	)
+
+	// Start the encoder
+	errChan, err := encoder.Start()
+	if err != nil {
+		t.Fatalf("Failed to start encoder: %v", err)
+	}
+
+	// Create and write some nodes
+	for i := 1; i <= 20; i++ {
+		node := &osm.Node{
+			ID:          osm.NodeID(i),
+			Lat:         51.5 + float64(i)*0.01,
+			Lon:         -0.2 + float64(i)*0.01,
+			Version:     1,
+			Timestamp:   time.Now(),
+			ChangesetID: osm.ChangesetID(123),
+			UserID:      osm.UserID(456),
+			User:        "testuser",
+			Visible:     true,
+			Tags: osm.Tags{
+				{Key: "test", Value: fmt.Sprintf("node_%d", i)},
+			},
+		}
+		if err := encoder.WriteNode(node); err != nil {
+			t.Fatalf("Failed to write node: %v", err)
+		}
+	}
+
+	// Create and write some ways
+	for i := 1; i <= 10; i++ {
+		way := &osm.Way{
+			ID:          osm.WayID(i),
+			Version:     1,
+			Timestamp:   time.Now(),
+			ChangesetID: osm.ChangesetID(123),
+			UserID:      osm.UserID(456),
+			User:        "testuser",
+			Visible:     true,
+			Nodes: osm.WayNodes{
+				{ID: osm.NodeID(i)},
+				{ID: osm.NodeID(i + 1)},
+				{ID: osm.NodeID(i + 2)},
+			},
+			Tags: osm.Tags{
+				{Key: "test", Value: fmt.Sprintf("way_%d", i)},
+			},
+		}
+		if err := encoder.WriteWay(way); err != nil {
+			t.Fatalf("Failed to write way: %v", err)
+		}
+	}
+
+	// Create and write some relations
+	for i := 1; i <= 5; i++ {
+		relation := &osm.Relation{
+			ID:          osm.RelationID(i),
+			Version:     1,
+			Timestamp:   time.Now(),
+			ChangesetID: osm.ChangesetID(123),
+			UserID:      osm.UserID(456),
+			User:        "testuser",
+			Visible:     true,
+			Members: osm.Members{
+				{Type: osm.TypeWay, Ref: int64(i), Role: "outer"},
+				{Type: osm.TypeWay, Ref: int64(i + 1), Role: "inner"},
+			},
+			Tags: osm.Tags{
+				{Key: "test", Value: fmt.Sprintf("relation_%d", i)},
+			},
+		}
+		if err := encoder.WriteRelation(relation); err != nil {
+			t.Fatalf("Failed to write relation: %v", err)
+		}
+	}
+
+	// Test WriteObject method
+	node := &osm.Node{
+		ID:  osm.NodeID(100),
+		Lat: 51.5,
+		Lon: -0.1,
+	}
+	if err := encoder.WriteObject(node); err != nil {
+		t.Fatalf("Failed to write object: %v", err)
+	}
+
+	// Close the encoder
+	if err := encoder.Close(); err != nil {
+		t.Fatalf("Failed to close encoder: %v", err)
+	}
+
+	// Check for errors
+	for err := range errChan {
+		t.Fatalf("Encoder error: %v", err)
+	}
+
+	// Now read back the data to verify it was encoded correctly
+	r := bytes.NewReader(buf.Bytes())
+	scanner := New(context.Background(), r, 1)
+	defer scanner.Close()
+
+	// Check header
+	header, err := scanner.Header()
+	if err != nil {
+		t.Fatalf("Failed to read header: %v", err)
+	}
+
+	// Verify header contents
+	if header.WritingProgram != "streaming-test" {
+		t.Errorf("Expected writing program 'streaming-test', got '%s'", header.WritingProgram)
+	}
+
+	// Count objects
+	var nodeCount, wayCount, relationCount int
+	for scanner.Scan() {
+		obj := scanner.Object()
+		switch obj.(type) {
+		case *osm.Node:
+			nodeCount++
+		case *osm.Way:
+			wayCount++
+		case *osm.Relation:
+			relationCount++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("Scanner error: %v", err)
+	}
+
+	// Verify counts
+	if nodeCount != 21 { // 20 regular nodes + 1 from WriteObject
+		t.Errorf("Expected 21 nodes, got %d", nodeCount)
+	}
+	if wayCount != 10 {
+		t.Errorf("Expected 10 ways, got %d", wayCount)
+	}
+	if relationCount != 5 {
+		t.Errorf("Expected 5 relations, got %d", relationCount)
 	}
 }

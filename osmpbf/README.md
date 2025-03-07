@@ -58,7 +58,7 @@ if err != nil {
 
 // Write some OSM objects
 encoder.WriteNode(&osm.Node{
-	ID:  1,
+	ID:  osm.NodeID(1),
 	Lat: 51.5074,
 	Lon: -0.1278,
 	Tags: osm.Tags{
@@ -67,10 +67,10 @@ encoder.WriteNode(&osm.Node{
 })
 
 encoder.WriteWay(&osm.Way{
-	ID: 2,
+	ID: osm.WayID(2),
 	Nodes: osm.WayNodes{
-		{ID: 1},
-		{ID: 3},
+		{ID: osm.NodeID(1)},
+		{ID: osm.NodeID(3)},
 	},
 	Tags: osm.Tags{
 		{Key: "highway", Value: "residential"},
@@ -84,6 +84,63 @@ if err := encoder.Close(); err != nil {
 
 // Check for any encoding errors
 for err := range errChan {
+	panic(err)
+}
+```
+
+## Streaming Encoder Example:
+
+For processing large datasets or continuous streams of data, the StreamingEncoder provides automatic batching and flushing:
+
+```go
+file, err := os.Create("./output.osm.pbf")
+if err != nil {
+	panic(err)
+}
+defer file.Close()
+
+// Create a streaming encoder with options
+encoder := osmpbf.NewStreamingEncoder(file,
+	osmpbf.WithWritingProgram("my-program"),
+	osmpbf.WithCompression(true),
+	osmpbf.WithBatchSize(5000), // Flush every 5000 elements
+	osmpbf.WithErrorHandler(func(err error) {
+		log.Printf("Encoder error: %v", err)
+	}),
+)
+
+// Start the encoder
+errChan, err := encoder.Start()
+if err != nil {
+	panic(err)
+}
+
+// Handle encoder errors in a separate goroutine
+go func() {
+	for err := range errChan {
+		log.Printf("Encoder error: %v", err)
+	}
+}()
+
+// Process a large number of elements
+for i := 1; i <= 1000000; i++ {
+	node := &osm.Node{
+		ID:  osm.NodeID(i),
+		Lat: 51.5 + float64(i%1000)*0.001,
+		Lon: -0.2 + float64(i%1000)*0.001,
+		Tags: osm.Tags{
+			{Key: "example", Value: fmt.Sprintf("node_%d", i)},
+		},
+	}
+
+	// Write the node - this will automatically flush when batch size is reached
+	if err := encoder.WriteNode(node); err != nil {
+		log.Printf("Failed to write node: %v", err)
+	}
+}
+
+// Close the encoder when done
+if err := encoder.Close(); err != nil {
 	panic(err)
 }
 ```
